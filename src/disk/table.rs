@@ -12,6 +12,17 @@ pub enum TableErr {
 const INDEX_FILE_SUFFIX: &str = ".index";
 const DATA_FILE_SUFFIX: &str = ".data";
 
+pub fn merge_and_flush(left_file_name: &str, right_file_name: &str, new_file_name: &str) -> Result<(), TableErr> {
+    let left_iter = iterate_entries(left_file_name)?;
+    let right_iter = iterate_entries(right_file_name)?;
+
+    // let merge_iter = MergeIter::new(left_iter, right_iter);
+
+    // flush(new_file_name, merge_iter);
+
+    Ok(())
+}
+
 /// Writes the data from the given iterator to disk.
 /// 
 /// Index files consist of newline-delimited pairs of key:position, where position encodes both 
