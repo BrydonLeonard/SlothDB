@@ -1,4 +1,5 @@
 use crate::model::kv::KV;
+use crate::merge_iter::{ MergeIter, Which };
 use std::fs::File;
 use std::io::{self, BufRead};
 
@@ -16,9 +17,21 @@ pub fn merge_and_flush(left_file_name: &str, right_file_name: &str, new_file_nam
     let left_iter = iterate_entries(left_file_name)?;
     let right_iter = iterate_entries(right_file_name)?;
 
-    // let merge_iter = MergeIter::new(left_iter, right_iter);
+    let merge_iter = MergeIter::new(left_iter, right_iter, |left_result, right_result| {
+        match (left_result, right_result) {
+            (Ok(left), Ok(right)) => {
+                if left.key < right.key {
+                    Which::Left
+                } else {
+                    Which::Right
+                }
+            }
+            (Err(_), _) => Which::Left,
+            (_, Err(_)) => Which::Right,
+        }
+    }).map(|result| { result.expect("") });
 
-    // flush(new_file_name, merge_iter);
+    flush(new_file_name, merge_iter);
 
     Ok(())
 }
@@ -30,7 +43,7 @@ pub fn merge_and_flush(left_file_name: &str, right_file_name: &str, new_file_nam
 ///
 /// The data files are just every value concatenated and written to disk as a string.
 /// 
-pub fn flush<'a>(file_name: &str, in_data: impl Iterator<Item = &'a KV>) -> Result<(), TableErr> {
+pub fn flush<'a>(file_name: &str, in_data: impl Iterator<Item = KV>) -> Result<(), TableErr> {
     let index_file_name = format!("{}{}", file_name, INDEX_FILE_SUFFIX);
     let data_file_name = format!("{}{}", file_name, DATA_FILE_SUFFIX);
         
@@ -171,22 +184,26 @@ mod tests {
     static INIT: Once = Once::new();
     const TEST_FILE_NAME: &str = "test_files/disk_test";
 
-    /// Initializes the test data and returns it in case a test wants to compare to it
-    fn test_init() -> [KV; 5] {
-        let data = [
-            KV { key: String::from("foo"), value: String::from("fooble") },
+    fn test_data() -> [KV; 5] {
+        [
             KV { key: String::from("bar"), value: String::from("barble") },
             KV { key: String::from("baz"), value: String::from("bazzle") },
-            KV { key: String::from("raz"), value: String::from("razzle") },
             KV { key: String::from("daz"), value: String::from("dazzle") },
-        ];
-
-        INIT.call_once(|| {
-            flush(TEST_FILE_NAME, data.iter()).expect("Failed to initialize test data");
-        });
-
-        return data;
+            KV { key: String::from("foo"), value: String::from("fooble") },
+            KV { key: String::from("raz"), value: String::from("razzle") },
+        ]
     }
+
+
+    /// Initializes the test data and returns it in case a test wants to compare to it
+    fn test_init() {
+        INIT.call_once(|| {
+            let data = test_data();
+
+            flush(TEST_FILE_NAME, data.into_iter()).expect("Failed to initialize test data");
+        });
+    }
+
 
     #[test]
     fn flushes() -> Result<(), TableErr> {
@@ -197,8 +214,8 @@ mod tests {
         let data_file_contents = std::fs::read_to_string(format!("{}{}", TEST_FILE_NAME, ".data"))?;
         let index_file_contents = std::fs::read_to_string(format!("{}{}", TEST_FILE_NAME, ".index"))?;
 
-        assert_eq!("fooblebarblebazzlerazzledazzle", data_file_contents);
-        assert_eq!("foo:0,6\nbar:6,6\nbaz:12,6\nraz:18,6\ndaz:24,6", index_file_contents);
+        assert_eq!("barblebazzledazzlefooblerazzle", data_file_contents);
+        assert_eq!("bar:0,6\nbaz:6,6\ndaz:12,6\nfoo:18,6\nraz:24,6", index_file_contents);
 
         Ok(())
     }
@@ -226,7 +243,8 @@ mod tests {
 
     #[test]
     fn iterates() -> Result<(), TableErr> {
-        let data = test_init();
+        test_init();
+        let data = test_data();
 
         let iterator = iterate_entries(TEST_FILE_NAME)?;
 
@@ -242,5 +260,27 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn merges() -> Result<(), TableErr> {
+        test_init();
+        let test_data_2 = [
+            KV { key: String::from("bang"), value: String::from("bangle") },
+            KV { key: String::from("far"), value: String::from("farbing") },
+        ];
+
+        let _ = flush("test_files/test_data_2", test_data_2.into_iter());
+        let _ = merge_and_flush(TEST_FILE_NAME, "test_files/test_data_2", "test_files/merged_data");
+
+        let data_file_contents = std::fs::read_to_string(format!("{}{}", "test_files/merged_data", ".data"))?;
+        let index_file_contents = std::fs::read_to_string(format!("{}{}", "test_files/merged_data", ".index"))?;
+
+        assert_eq!("banglebarblebazzledazzlefarbingfooblerazzle", data_file_contents);
+        assert_eq!("bang:0,6\nbar:6,6\nbaz:12,6\ndaz:18,6\nfar:24,7\nfoo:31,6\nraz:37,6", index_file_contents);
+        Ok(())
+    }
+
+
+        
 }
 
