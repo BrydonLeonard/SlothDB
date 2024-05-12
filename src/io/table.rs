@@ -1,12 +1,12 @@
-use crate::model::kv::KV;
-use crate::merge_iter::{ MergeIter, Which };
+use crate::lsm::kv::KV;
+use crate::lsm::merge_iter::{ MergeIter, MergeDecision, kv_merge };
 use std::fs::File;
 use std::io::{self, BufRead};
 
 #[derive(Debug)]
 pub enum TableErr {
     IO(String),
-    KvMissing(String),
+    KeyNotFound,
     BadFile(String),
 }
 
@@ -19,19 +19,13 @@ pub fn merge_and_flush(left_file_name: &str, right_file_name: &str, new_file_nam
 
     let merge_iter = MergeIter::new(left_iter, right_iter, |left_result, right_result| {
         match (left_result, right_result) {
-            (Ok(left), Ok(right)) => {
-                if left.key < right.key {
-                    Which::Left
-                } else {
-                    Which::Right
-                }
-            }
-            (Err(_), _) => Which::Left,
-            (_, Err(_)) => Which::Right,
+            (Err(_), _) => MergeDecision::Left(false),
+            (_, Err(_)) => MergeDecision::Right(false),
+            (Ok(left), Ok(right)) => kv_merge(left, right),
         }
     }).map(|result| { result.expect("") });
 
-    flush(new_file_name, merge_iter);
+    let _ = flush(new_file_name, merge_iter);
 
     Ok(())
 }
@@ -69,9 +63,10 @@ pub fn flush<'a>(file_name: &str, in_data: impl Iterator<Item = KV>) -> Result<(
 }
 
 pub fn file_contains(file_name: &str, key: &str) -> Result<bool, TableErr> {
-    match data_file_position(file_name, key)? {
-        Some(_) => return Ok(true),
-        None => return Ok(false),
+    match data_file_position(file_name, key) {
+        Ok(_) => return Ok(true),
+        Err(TableErr::KeyNotFound) => return Ok(false),
+        Err(e) => Err(e),
     }
 }
 
@@ -79,12 +74,10 @@ pub fn file_contains(file_name: &str, key: &str) -> Result<bool, TableErr> {
 /// TODO: This currently reads the whole file into memory. That's obviously
 /// not what we want to be doing. We have the position of the value in the 
 /// file, so skip straight there and read it.
-pub fn read(file_name: &str, key: &str) -> Result<Option<String>, TableErr> {
-    let Some(position) = data_file_position(file_name, key)? else {
-        return Ok(None);
-    };
+pub fn read(file_name: &str, key: &str) -> Result<String, TableErr> {
+    let position = data_file_position(file_name, key)?;
     
-    Ok(Some(read_at_position(file_name, position)?))
+    read_at_position(file_name, position)
 }
 
 fn read_at_position(file_name: &str, position: DataPosition) -> Result<String, TableErr> {
@@ -154,7 +147,7 @@ impl DataPosition {
     }
 }
 
-fn data_file_position(file_name: &str, key: &str) -> Result<Option<DataPosition>, TableErr> {
+fn data_file_position(file_name: &str, key: &str) -> Result<DataPosition, TableErr> {
     let index_file_name = format!("{}{}", file_name, INDEX_FILE_SUFFIX);
 
     let index_file_reader = io::BufReader::new(File::open(index_file_name)?);
@@ -163,11 +156,11 @@ fn data_file_position(file_name: &str, key: &str) -> Result<Option<DataPosition>
         let l = line?;
 
         if l.starts_with(key) {
-            return Ok(Some(DataPosition::from_key(&l)?));
+            return Ok(DataPosition::from_key(&l)?);
         }
     }
 
-    Ok(None)
+    Err(TableErr::KeyNotFound)
 }
 
 impl From<std::io::Error> for TableErr {
@@ -236,7 +229,7 @@ mod tests {
     fn reads() -> Result<(), TableErr> {
         test_init();
 
-        assert_eq!("razzle", read(TEST_FILE_NAME, "raz")?.unwrap());
+        assert_eq!("razzle", read(TEST_FILE_NAME, "raz")?);
 
         Ok(())
     }
