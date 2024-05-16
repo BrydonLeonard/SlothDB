@@ -30,6 +30,14 @@ pub fn merge_and_flush(left_file_name: &str, right_file_name: &str, new_file_nam
     Ok(())
 }
 
+pub fn clean(file_name: &str) -> Result<(), TableErr> {
+    std::fs::remove_file(index_fn(file_name))?;
+    std::fs::remove_file(data_fn(file_name))?;
+
+    Ok(())
+}
+
+
 /// Writes the data from the given iterator to disk.
 /// 
 /// Index files consist of newline-delimited pairs of key:position, where position encodes both 
@@ -37,9 +45,9 @@ pub fn merge_and_flush(left_file_name: &str, right_file_name: &str, new_file_nam
 ///
 /// The data files are just every value concatenated and written to disk as a string.
 /// 
-pub fn flush<'a>(file_name: &str, in_data: impl Iterator<Item = KV>) -> Result<(), TableErr> {
-    let index_file_name = format!("{}{}", file_name, INDEX_FILE_SUFFIX);
-    let data_file_name = format!("{}{}", file_name, DATA_FILE_SUFFIX);
+pub fn flush<'a>(file_name: &str, in_data: impl IntoIterator<Item = KV>) -> Result<(), TableErr> {
+    let index_file_name = index_fn(file_name);
+    let data_file_name = data_fn(file_name);
         
     let mut out_data: Vec<String> = Vec::new();
     let mut out_index: Vec<String> = Vec::new();
@@ -81,7 +89,7 @@ pub fn read(file_name: &str, key: &str) -> Result<String, TableErr> {
 }
 
 fn read_at_position(file_name: &str, position: DataPosition) -> Result<String, TableErr> {
-    let data_file_name = format!("{}{}", file_name, DATA_FILE_SUFFIX);
+    let data_file_name = data_fn(file_name);
     let data = std::fs::read_to_string(data_file_name);
 
     let start: usize = position.0.try_into().expect("Couldn't parse u32 into usize");
@@ -91,7 +99,7 @@ fn read_at_position(file_name: &str, position: DataPosition) -> Result<String, T
 }
 
 pub fn iterate_entries<'a>(file_name: &'a str) -> Result<impl Iterator<Item = Result<KV, TableErr>> + 'a, TableErr> {
-    let index_file_name = format!("{}{}", file_name, INDEX_FILE_SUFFIX);
+    let index_file_name = index_fn(file_name);
     
     let index_reader = io::BufReader::new(File::open(index_file_name)?);
     
@@ -148,7 +156,7 @@ impl DataPosition {
 }
 
 fn data_file_position(file_name: &str, key: &str) -> Result<DataPosition, TableErr> {
-    let index_file_name = format!("{}{}", file_name, INDEX_FILE_SUFFIX);
+    let index_file_name = index_fn(file_name);
 
     let index_file_reader = io::BufReader::new(File::open(index_file_name)?);
 
@@ -167,6 +175,14 @@ impl From<std::io::Error> for TableErr {
     fn from(error: std::io::Error) -> Self {
         return TableErr::IO(format!("Failed to open file: {:?}", error));
     }
+}
+
+fn index_fn(name: &str) -> String {
+    format!("{}{}", name, INDEX_FILE_SUFFIX)
+}
+
+fn data_fn(name: &str) -> String {
+    format!("{}{}", name, DATA_FILE_SUFFIX)
 }
 
 #[cfg(test)]
