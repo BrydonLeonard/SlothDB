@@ -2,13 +2,15 @@ use crate::io::table;
 use crate::io::table::TableErr;
 use crate::lsm::kv::KV;
 use crate::lsm::merge_iter::{ MergeIter, kv_merge, result_merge };
-use std::collections::VecDeque;
+use std::collections::{ VecDeque, HashMap };
+use std::fs;
 
 struct LsmTree {
     name: String,
     levels: Vec<LsmLevel>,
 }
 
+#[derive(Debug)]
 struct LsmLevel {
     id: String,
     count: u32,
@@ -75,6 +77,91 @@ impl LsmTree {
             max_size: u32::try_from(new_index + 1).expect("Failed to convert usize -> u32") * LEVEL_SCALING_FACTOR 
         });
     }
+
+    /// Loads a table from disk
+    /// The abstraction isn't leak_ing_ here; it's leaked all over the floor and 
+    /// I have no mop. Version two needs to encapsulate all of this _somewhere_.
+    fn load(table_name: &str) -> Result<LsmTree, TableErr> {
+        let files = Self::list_files(&table_name)?;
+
+        // Map of level to min and max index. Because we compact from the beginning,
+        // the remaining files will be contiguous.
+        let mut levels: HashMap<i32, (i32, i32)> = HashMap::new();
+        for file in files {
+            if file.ends_with(".index") {
+                let (level, index) = Self::parse_file_name(&file[0..(file.len() - 6)])?;
+
+                println!("Got level/index: {:?}, {:?}", level, index);
+                if !levels.contains_key(&level) {
+                    levels.insert(level, (index, index));
+                } else {
+                    let current_value = levels[&level];
+                    let lower = i32::min(current_value.0, index);
+                    let upper = i32::max(current_value.1, index);
+                    levels.insert(level, (lower, upper));
+                }
+            }
+        }
+
+        let mut lsm_levels: Vec<LsmLevel> = Vec::new();
+        for level_index in 0..levels.keys().len() {
+            println!("Populating level {:?}", level_index);
+
+            let (min, max) = levels[&i32::try_from(level_index).expect("Failed to convert")];
+
+            println!("  ({:?}, {:?})", min, max);
+            let max_u32 = u32::try_from(max).expect("Failed to convert");
+            let min_u32 = u32::try_from(min).expect("Failed to convert");
+            let tables = VecDeque::from((min_u32..(max_u32+1)).collect::<Vec<_>>());
+
+            println!("  Loaded tables: {:?}", tables);
+
+            lsm_levels.push(LsmLevel {
+                id: format!("{}-{}", table_name, level_index.to_string()),
+                max_size: u32::try_from(level_index + 1).expect("Failed to convert usize -> u32") * LEVEL_SCALING_FACTOR,
+                count: u32::try_from(max - min + 1).expect("Failed to convert"),
+                tables: tables
+            });
+        }
+
+        println!("Creating tree with table name {}", table_name.to_string());
+        Ok(LsmTree { 
+            name: table_name.to_string(),
+            levels: lsm_levels,
+        })
+    }
+
+    /// Parses the file name to find the level and index of a given database file
+    /// File names look like `filename-level-name`
+    fn parse_file_name(file_name: &str) -> Result<(i32, i32), TableErr> {
+        let dash_indices: Vec<_> = file_name.match_indices("-").collect();
+        if dash_indices.len () != 2 {
+            return Err(TableErr::BadFile(String::from("File name should have level and index parts")));
+        }
+        
+        println!("parsing file name {} with indices ({:?}, {:?})", file_name, dash_indices[0], dash_indices[1]);
+        println!("  {:?}", &file_name[dash_indices[0].0 + 1..dash_indices[1].0]);
+        println!("  {:?}", &file_name[dash_indices[1].0 + 1..file_name.len()]);
+        let level_part = file_name[dash_indices[0].0 + 1..dash_indices[1].0].parse()?;
+        let index_part = file_name[dash_indices[1].0 + 1..file_name.len()].parse()?;
+
+        Ok((level_part, index_part))
+    }
+    
+    fn list_files<'a>(table_name: &'a str) -> Result<impl Iterator<Item = String> + 'a, TableErr> {
+        let (path_part, name_part) = if table_name.contains("/") {
+            let slash_indices: Vec<_> = table_name.match_indices("/").collect();
+            let last_slash = slash_indices[slash_indices.len() - 1].0;
+
+            (&table_name[0..last_slash], &table_name[last_slash + 1..table_name.len() - 1])
+        } else {
+            ("./", table_name)
+        };
+
+        let paths = fs::read_dir(path_part)?;
+
+        Ok(paths.map(|path| path.unwrap().path().display().to_string()).filter(move |path| path.contains(name_part)))
+    }
 }
 
 /// Implemented by types that can read values for a key from _somewhere_
@@ -120,25 +207,30 @@ impl LsmLevel {
 
 impl Scan for LsmLevel {
     fn read(&self, key: &str) -> Result<String, TableErr> {
+        println!("Checking level {:?}", &self.id);
+        println!("  Level has {:?} tables", &self.table_names().into_iter().collect::<Vec<_>>().len());
         for lsm_table in self.table_names() {
+            println!("Checking table {:?}", lsm_table);
             if table::file_contains(&lsm_table, key)? {
                 return table::read(&lsm_table, key);
             }
         }
 
-        Err(TableErr::KeyNotFound)
+        Err(TableErr::KeyNotFound(key.to_string()))
     }
 }
 
 impl Scan for LsmTree {
     fn read(&self, key: &str) -> Result<String, TableErr> {
+        println!("Checking levels: {:?}. This tree's name is {}", &self.levels, &self.name);
         for level in &self.levels {
-            if let Ok(value) = level.read(key) {
-                return Ok(value);
+            match level.read(key) {
+                Ok(value) => return Ok(value),
+                Err(e) => println!("{:?}", e),
             }
         }
         
-        Err(TableErr::KeyNotFound)
+        Err(TableErr::KeyNotFound(key.to_string()))
     }
 }
 
@@ -167,7 +259,41 @@ mod test {
 
         let f = fs::read_to_string("test_files/lsm_test-1-1.data")?;
 
+        let a_value = tree.read("a")?;
+        let b_value = tree.read("b")?;
+
         assert_eq!("501210512125", f);
+        assert_eq!(a_value, "50".to_string());
+        assert_eq!(b_value, "12".to_string());
+
+        Ok(())
+    }
+    
+    #[test]
+    fn loads() -> Result<(), TableErr> {
+        let mut tree = LsmTree { 
+            levels: Vec::new(),
+            name: String::from("test_files/load_test"),
+        };
+
+        let _ = tree.add(vec![
+                 KV { key: String::from("a"), value: 50.to_string() },
+                 KV { key: String::from("c"), value: 10512.to_string() },
+        ])?;
+
+        let _ = tree.add(vec![
+                 KV { key: String::from("b"), value: 12.to_string() },
+                 KV { key: String::from("e"), value: 125.to_string() },
+        ])?;
+
+        let loaded_tree: LsmTree = LsmTree::load("test_files/load_test")?;
+
+        let a_value = loaded_tree.read("a")?;
+        let b_value = loaded_tree.read("b")?;
+
+        assert_eq!(a_value, "50".to_string());
+        assert_eq!(b_value, "12".to_string());
+
 
         Ok(())
     }

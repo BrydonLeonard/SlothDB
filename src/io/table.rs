@@ -2,11 +2,12 @@ use crate::lsm::kv::KV;
 use crate::lsm::merge_iter::{ MergeIter, MergeDecision, kv_merge };
 use std::fs::File;
 use std::io::{self, BufRead};
+use std::num::ParseIntError;
 
 #[derive(Debug)]
 pub enum TableErr {
     IO(String),
-    KeyNotFound,
+    KeyNotFound(String),
     BadFile(String),
 }
 
@@ -71,9 +72,10 @@ pub fn flush<'a>(file_name: &str, in_data: impl IntoIterator<Item = KV>) -> Resu
 }
 
 pub fn file_contains(file_name: &str, key: &str) -> Result<bool, TableErr> {
+    println!("Checking whether {} contains {}", file_name, key);
     match data_file_position(file_name, key) {
         Ok(_) => return Ok(true),
-        Err(TableErr::KeyNotFound) => return Ok(false),
+        Err(TableErr::KeyNotFound(_)) => return Ok(false),
         Err(e) => Err(e),
     }
 }
@@ -83,6 +85,7 @@ pub fn file_contains(file_name: &str, key: &str) -> Result<bool, TableErr> {
 /// not what we want to be doing. We have the position of the value in the 
 /// file, so skip straight there and read it.
 pub fn read(file_name: &str, key: &str) -> Result<String, TableErr> {
+    println!("Checking {:?} for {:?}", file_name, key);
     let position = data_file_position(file_name, key)?;
     
     read_at_position(file_name, position)
@@ -157,6 +160,8 @@ impl DataPosition {
 
 fn data_file_position(file_name: &str, key: &str) -> Result<DataPosition, TableErr> {
     let index_file_name = index_fn(file_name);
+    
+    println!("Index file name is {}", index_file_name);
 
     let index_file_reader = io::BufReader::new(File::open(index_file_name)?);
 
@@ -168,12 +173,18 @@ fn data_file_position(file_name: &str, key: &str) -> Result<DataPosition, TableE
         }
     }
 
-    Err(TableErr::KeyNotFound)
+    Err(TableErr::KeyNotFound(key.to_string()))
 }
 
 impl From<std::io::Error> for TableErr {
     fn from(error: std::io::Error) -> Self {
         return TableErr::IO(format!("Failed to open file: {:?}", error));
+    }
+}
+
+impl From<ParseIntError> for TableErr {
+    fn from(err: ParseIntError) -> Self {
+        return TableErr::BadFile(format!("Failed to parse Int: {:?}", err));
     }
 }
 
