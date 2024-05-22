@@ -5,7 +5,7 @@ use crate::lsm::merge_iter::{ MergeIter, kv_merge, result_merge };
 use std::collections::{ VecDeque, HashMap };
 use std::fs;
 
-struct LsmTree {
+pub struct LsmTree {
     name: String,
     levels: Vec<LsmLevel>,
 }
@@ -27,6 +27,23 @@ fn kv_merge_iter<T>(l: T, r: T) -> MergeIter<T, Result<KV, TableErr>>
 const LEVEL_SCALING_FACTOR: u32 = 1;
 
 impl LsmTree {
+    pub fn new(name: String) -> Result<LsmTree, TableErr> {
+        Ok(LsmTree {
+            name,
+            levels: Vec::new(),
+        })
+    }
+
+    pub fn add(&mut self, in_data: impl IntoIterator<Item = KV>) -> Result<(), TableErr> {
+        if self.levels.len() == 0 {
+            self.add_level();
+        }
+        let level = &mut self.levels[0];
+        let new_table_name = level.new_table();
+
+        table::flush(&new_table_name, in_data)
+    }
+
     /// The merge part of an LSM Tree. This is pretty inefficiently implemented for now, but
     /// it'll do the job.
     ///
@@ -56,16 +73,6 @@ impl LsmTree {
         };
         
         Ok(())
-    }
-
-    fn add(&mut self, in_data: impl IntoIterator<Item = KV>) -> Result<(), TableErr> {
-        if self.levels.len() == 0 {
-            self.add_level();
-        }
-        let level = &mut self.levels[0];
-        let new_table_name = level.new_table();
-
-        table::flush(&new_table_name, in_data)
     }
 
     fn add_level(&mut self) {
@@ -165,7 +172,7 @@ impl LsmTree {
 }
 
 /// Implemented by types that can read values for a key from _somewhere_
-trait Scan {
+pub trait Scan {
     fn read(&self, key: &str) -> Result<String, TableErr>;
 }
 
